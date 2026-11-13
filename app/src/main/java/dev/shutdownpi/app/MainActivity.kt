@@ -98,6 +98,7 @@ class MainActivity : ComponentActivity() {
         var countdownCancelled by remember { mutableStateOf(false) }
         var countdown by remember { mutableIntStateOf(120) }
         var online by remember { mutableStateOf(setOf<String>()) }
+        var connectionStates by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
         val scope = rememberCoroutineScope()
         var keyFingerprint by remember { mutableStateOf<String?>(null) }
         var keyDecision by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
@@ -130,7 +131,14 @@ class MainActivity : ComponentActivity() {
                         if (working != null && status.startsWith("Shutdown in")) {
                             TextButton(onClick = { countdownCancelled = true }) { Text("Cancel", color = Raspberry) }
                         }
-                        Box(Modifier.size(11.dp).background(if (working == null) Green else Raspberry, CircleShape))
+                        val networkColor = when {
+                            working != null -> Raspberry
+                            connectionStates.values.any { it == "online" } -> Green
+                            connectionStates.values.any { it == "auth" } -> Color(0xFFFFC36B)
+                            connectionStates.values.any { it == "offline" } -> Raspberry
+                            else -> Muted
+                        }
+                        Box(Modifier.size(11.dp).background(networkColor, CircleShape))
                     }
                     Spacer(Modifier.height(17.dp))
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -148,9 +156,20 @@ class MainActivity : ComponentActivity() {
                     } else LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 16.dp)) {
                         items(nodes, key = { it.id }) { node ->
                             NodeCard(node = node, isExpanded = expanded == node.id, isOnline = node.id in online,
-                                busy = working == node.id, cancelCountdown = { countdownCancelled = true },
+                                connectionState = connectionStates[node.id] ?: "unknown",
+                                busy = working == node.id, busyLabel = if (status.startsWith("Checking SSH")) "Checking" else "Working",
+                                cancelCountdown = { countdownCancelled = true },
                                 canCancel = working == node.id && status.startsWith("Shutdown in"), onExpand = { expanded = if (expanded == node.id) null else node.id },
                                 onEdit = { editing = node; showEditor = true }, onDelete = { showDelete = node },
+                                onCheck = {
+                                    working = node.id; status = "Checking SSH to ${node.name}…"
+                                    scope.launch {
+                                        val result = withContext(Dispatchers.IO) { probeSsh(node, activity.filesDir, activity) }
+                                        connectionStates = connectionStates + (node.id to result.first)
+                                        online = if (result.first == "online") online + node.id else online - node.id
+                                        status = result.second; working = null
+                                    }
+                                },
                                 onShutdown = { confirmAction = node to "shutdown" }, onReboot = { confirmAction = node to "reboot" })
                         }
                     }
@@ -165,11 +184,11 @@ class MainActivity : ComponentActivity() {
 
         if (showEditor) NodeEditor(editing, onDismiss = { showEditor = false }, onSave = { node ->
             val updated = if (editing == null) nodes + node else nodes.map { if (it.id == editing!!.id) node.copy(id = editing!!.id) else it }
-            nodes = updated; saveNodes(prefs, updated); expanded = node.id; showEditor = false
+            nodes = updated; saveNodes(prefs, updated); connectionStates = connectionStates - node.id; online = online - node.id; expanded = node.id; showEditor = false
         })
         showDelete?.let { node -> AlertDialog(onDismissRequest = { showDelete = null }, title = { Text("Remove ${node.name}?") },
             text = { Text("This deletes the saved login and remembered SSH host key from this device.") },
-            confirmButton = { TextButton(onClick = { nodes = nodes.filterNot { it.id == node.id }; saveNodes(prefs, nodes); File(activity.filesDir, "ssh_known_hosts_${node.id}").delete(); showDelete = null }) { Text("Remove", color = Raspberry) } },
+            confirmButton = { TextButton(onClick = { nodes = nodes.filterNot { it.id == node.id }; saveNodes(prefs, nodes); connectionStates = connectionStates - node.id; online = online - node.id; File(activity.filesDir, "ssh_known_hosts_${node.id}").delete(); showDelete = null }) { Text("Remove", color = Raspberry) } },
             dismissButton = { TextButton(onClick = { showDelete = null }) { Text("Cancel") } }, containerColor = Panel)
         }
         confirmAction?.let { (node, action) ->
@@ -194,7 +213,13 @@ class MainActivity : ComponentActivity() {
                         status = if (reboot) "Sending reboot…" else "Sending shutdown…"
                         val result = withContext(Dispatchers.IO) { sendPowerAction(node, action) { fp -> activity.verifyUnknownHost(fp) } }
                         status = result
+                        if (action == "shutdown") {
+                            online = online - node.id
+                            connectionStates = connectionStates + (node.id to "unknown")
+                        }
                         if (reboot && (result.startsWith("Reboot command sent") || result.startsWith("Reboot command may have been accepted"))) {
+                            online = online - node.id
+                            connectionStates = connectionStates + (node.id to "unknown")
                             status = "Waiting for ${node.name} to reconnect…"
                             val deadline = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(10)
                             var reconnected = false
@@ -204,6 +229,7 @@ class MainActivity : ComponentActivity() {
                             }
                             status = if (reconnected) "Node back online" else "Still waiting for SSH; check the Pi or network"
                             if (reconnected) online = online + node.id
+                            connectionStates = connectionStates + (node.id to if (reconnected) "online" else "offline")
                         }
                         working = null
                     }
@@ -228,9 +254,10 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun NodeCard(node: PiNode, isExpanded: Boolean, isOnline: Boolean, busy: Boolean,
+@Composable private fun NodeCard(node: PiNode, isExpanded: Boolean, isOnline: Boolean, connectionState: String, busy: Boolean, busyLabel: String,
                                  cancelCountdown: () -> Unit, canCancel: Boolean,
                                  onExpand: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit,
+                                 onCheck: () -> Unit,
                                  onShutdown: () -> Unit, onReboot: () -> Unit) {
     Column(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(18.dp)).animateContentSize()) {
         Row(Modifier.fillMaxWidth().clickable(onClick = onExpand).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -240,8 +267,21 @@ class MainActivity : ComponentActivity() {
                 Text(node.name, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(3.dp)); Text("${node.username}@${node.host}:${node.port}", color = Muted, fontSize = 12.sp)
             }
-            Box(Modifier.size(8.dp).background(if (isOnline) Green else Muted.copy(alpha = .5f), CircleShape))
-            Spacer(Modifier.width(9.dp)); Text(if (busy) "Working" else if (isOnline) "Online" else "Ready", fontSize = 11.sp, color = if (isOnline) Green else Muted)
+            val stateLabel = when {
+                isOnline -> "Online"
+                connectionState == "offline" -> "Unreachable"
+                connectionState == "auth" -> "Login failed"
+                connectionState == "unverified" -> "Verify host"
+                else -> "Not checked"
+            }
+            val stateColor = when (connectionState) {
+                "online" -> Green
+                "auth", "unverified" -> Color(0xFFFFC36B)
+                "offline" -> Raspberry
+                else -> Muted
+            }
+            Box(Modifier.size(8.dp).background(stateColor, CircleShape))
+            Spacer(Modifier.width(9.dp)); Text(if (busy) busyLabel else stateLabel, fontSize = 11.sp, color = stateColor)
             Spacer(Modifier.width(5.dp)); Text(if (isExpanded) "⌃" else "⌄", color = Muted, fontSize = 20.sp)
         }
         if (isExpanded) {
@@ -250,6 +290,10 @@ class MainActivity : ComponentActivity() {
                 if (canCancel) TextButton(onClick = cancelCountdown) { Text("Cancel", color = Raspberry) }
                 TextButton(onClick = onEdit, enabled = !busy) { Text("Edit", color = Text) }
                 TextButton(onClick = onDelete, enabled = !busy) { Text("Delete", color = Muted) }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onCheck, enabled = !busy) { Text("Check SSH", color = Green) }
+            }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 0.dp).padding(bottom = 11.dp), verticalAlignment = Alignment.CenterVertically) {
                 Spacer(Modifier.weight(1f))
                 OutlinedButton(onClick = onReboot, enabled = !busy, shape = RoundedCornerShape(12.dp)) { Text("↻  Reboot", color = Text, fontSize = 12.sp) }
                 Spacer(Modifier.width(7.dp))
@@ -342,6 +386,19 @@ private fun canConnect(node: PiNode, files: File, activity: MainActivity): Boole
     val session = createSession(node, files) { fp -> activity.verifyUnknownHost(fp) }
     session.connect(6000); session.disconnect(); true
 } catch (_: Exception) { false }
+
+private fun probeSsh(node: PiNode, files: File, activity: MainActivity): Pair<String, String> = try {
+    val session = createSession(node, files) { fp -> activity.verifyUnknownHost(fp) }
+    session.connect(12000); session.disconnect()
+    "online" to "${node.name} is reachable over SSH"
+} catch (e: Exception) {
+    val message = e.message.orEmpty()
+    when {
+        message.contains("auth fail", true) -> "auth" to "SSH host answered, but login failed"
+        message.contains("reject HostKey", true) || message.contains("HostKey", true) -> "unverified" to "Host key was not verified; check the fingerprint"
+        else -> "offline" to "No SSH connection to ${node.name}"
+    }
+}
 
 private fun createSession(node: PiNode, files: File, approve: (String) -> Boolean): Session {
     val jsch = JSch()
