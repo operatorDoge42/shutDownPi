@@ -25,8 +25,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.jcraft.jsch.ChannelExec
@@ -97,22 +95,12 @@ class MainActivity : ComponentActivity() {
         var confirmAction by remember { mutableStateOf<Pair<PiNode, String>?>(null) }
         var status by remember { mutableStateOf("Your nodes, at a glance") }
         var working by remember { mutableStateOf<String?>(null) }
-        var countdownCancelled by remember { mutableStateOf(false) }
         var countdown by remember { mutableIntStateOf(120) }
-        var appVisible by remember { mutableStateOf(true) }
         var online by remember { mutableStateOf(setOf<String>()) }
         var connectionStates by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
         val scope = rememberCoroutineScope()
         var keyFingerprint by remember { mutableStateOf<String?>(null) }
         var keyDecision by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
-        DisposableEffect(activity) {
-            val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_STOP) appVisible = false
-                if (event == Lifecycle.Event.ON_START) appVisible = true
-            }
-            activity.lifecycle.addObserver(observer)
-            onDispose { activity.lifecycle.removeObserver(observer) }
-        }
         SideEffect {
             requestHostKeyDialog = { keyFingerprint = pendingFingerprint }
         }
@@ -138,9 +126,6 @@ class MainActivity : ComponentActivity() {
                             Spacer(Modifier.height(7.dp))
                             Text("${nodes.size} ${if (nodes.size == 1) "node" else "nodes"} saved", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
                             Spacer(Modifier.height(3.dp)); Text(status, fontSize = 12.sp, color = Muted)
-                        }
-                        if (working != null && status.startsWith("Shutdown in")) {
-                            TextButton(onClick = { countdownCancelled = true }) { Text("Cancel", color = Raspberry) }
                         }
                         val networkColor = when {
                             working != null -> Raspberry
@@ -168,9 +153,12 @@ class MainActivity : ComponentActivity() {
                         items(nodes, key = { it.id }) { node ->
                             NodeCard(node = node, isExpanded = expanded == node.id, isOnline = node.id in online,
                                 connectionState = connectionStates[node.id] ?: "unknown",
-                                busy = working == node.id, busyLabel = if (status.startsWith("Checking SSH")) "Checking" else "Working",
-                                cancelCountdown = { countdownCancelled = true },
-                                canCancel = working == node.id && status.startsWith("Shutdown in"), onExpand = { expanded = if (expanded == node.id) null else node.id },
+                                busy = working == node.id, busyLabel = when {
+                                    status.startsWith("Checking SSH") -> "Checking"
+                                    status.startsWith("Likely safe to unplug") || status.startsWith("Command may have been accepted") -> "Shutdown pending"
+                                    else -> "Working"
+                                },
+                                onExpand = { expanded = if (expanded == node.id) null else node.id },
                                 onEdit = { editing = node; showEditor = true }, onDelete = { showDelete = node },
                                 onCheck = {
                                     working = node.id; status = "Checking SSH to ${node.name}…"
@@ -206,31 +194,33 @@ class MainActivity : ComponentActivity() {
             val reboot = action == "reboot"
             AlertDialog(onDismissRequest = { confirmAction = null }, title = { Text(if (reboot) "Reboot ${node.name}?" else "Shut down ${node.name}?") },
                 text = { Column {
-                    Text(if (reboot) "This will restart the Pi. SSH will disconnect while it reboots; the app will watch for it to reconnect." else "The app waits $countdown seconds before sending the shutdown command.")
+                    Text(if (reboot) "This will restart the Pi. SSH will disconnect while it reboots; the app will watch for it to reconnect." else "The shutdown command is sent right away. Then the app counts down $countdown seconds as a conservative unplug wait.")
                     Spacer(Modifier.height(12.dp))
                     if (!reboot) OutlinedTextField(value = countdown.toString(), onValueChange = { countdown = it.toIntOrNull()?.coerceIn(10, 300) ?: countdown },
-                        label = { Text("Countdown (seconds)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, colors = PiFieldColors())
-                    Spacer(Modifier.height(8.dp)); Text("For an idle Pi, this wait is likely safe, but the app can’t guarantee a safe shutdown. Check that the Pi isn’t doing important work.", color = Muted, fontSize = 12.sp)
+                        label = { Text("Wait before unplugging (seconds)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, colors = PiFieldColors())
+                    Spacer(Modifier.height(8.dp)); Text("After the command, this wait is likely safe for an idle Pi. It is only guidance, not a guarantee; check that shutdown has completed before unplugging.", color = Muted, fontSize = 12.sp)
                 } },
                 confirmButton = { TextButton(onClick = {
-                    confirmAction = null; working = node.id; countdownCancelled = false
+                    confirmAction = null; working = node.id
                     scope.launch {
-                        if (!reboot) {
-                            for (left in countdown downTo 1) {
-                                if (countdownCancelled || !appVisible) {
-                                    status = if (countdownCancelled) "Shutdown cancelled" else "Countdown cancelled because the app left the screen"
-                                    working = null
-                                    return@launch
-                                }
-                                status = "Shutdown in ${left}s"; delay(1000)
-                            }
-                        }
                         status = if (reboot) "Sending reboot…" else "Sending shutdown…"
                         val result = withContext(Dispatchers.IO) { sendPowerAction(node, action) { fp -> activity.verifyUnknownHost(fp) } }
                         status = result
                         if (action == "shutdown") {
                             online = online - node.id
                             connectionStates = connectionStates + (node.id to "unknown")
+                            val accepted = result.startsWith("Shutdown command sent") || result.startsWith("Shutdown may have started")
+                            if (accepted) {
+                                val deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(countdown.toLong())
+                                val uncertain = result.startsWith("Shutdown may have started")
+                                while (System.currentTimeMillis() < deadline) {
+                                    val left = ((deadline - System.currentTimeMillis() + 999) / 1000).toInt()
+                                    status = if (uncertain) "Command may have been accepted. Likely safe to unplug in ${left}s; verify the Pi."
+                                    else "Likely safe to unplug in ${left}s; check that the Pi is off."
+                                    delay(1000)
+                                }
+                                status = "Wait complete. It is likely safe to unplug only after confirming the Pi is shut down; this is not guaranteed."
+                            }
                         }
                         if (reboot && (result.startsWith("Reboot command sent") || result.startsWith("Reboot command may have been accepted"))) {
                             online = online - node.id
@@ -248,7 +238,7 @@ class MainActivity : ComponentActivity() {
                         }
                         working = null
                     }
-                }) { Text(if (reboot) "Reboot" else "Start countdown", color = Raspberry) } },
+                }) { Text(if (reboot) "Reboot" else "Send shutdown", color = Raspberry) } },
                 dismissButton = { TextButton(onClick = { confirmAction = null }) { Text("Cancel") } }, containerColor = Panel)
         }
         keyFingerprint?.let { fingerprint ->
@@ -270,7 +260,6 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable private fun NodeCard(node: PiNode, isExpanded: Boolean, isOnline: Boolean, connectionState: String, busy: Boolean, busyLabel: String,
-                                 cancelCountdown: () -> Unit, canCancel: Boolean,
                                  onExpand: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit,
                                  onCheck: () -> Unit,
                                  onShutdown: () -> Unit, onReboot: () -> Unit) {
@@ -302,7 +291,6 @@ class MainActivity : ComponentActivity() {
         if (isExpanded) {
             HorizontalDivider(color = Panel2, modifier = Modifier.padding(horizontal = 16.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (canCancel) TextButton(onClick = cancelCountdown) { Text("Cancel", color = Raspberry) }
                 TextButton(onClick = onEdit, enabled = !busy) { Text("Edit", color = Text) }
                 TextButton(onClick = onDelete, enabled = !busy) { Text("Delete", color = Muted) }
                 Spacer(Modifier.weight(1f))
