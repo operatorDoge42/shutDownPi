@@ -7,7 +7,7 @@ A private, local-first Android app for managing several Raspberry Pi nodes over 
 - Save, edit, expand, and remove multiple nodes.
 - Store node passwords in Android encrypted preferences, with key material protected by Android Keystore.
 - Verify an unknown SSH server by showing its SHA-256 host-key fingerprint before trust; save approved keys in the app's private files. A changed key blocks access.
-- Run shutdown after an adjustable 10–300 second in-app countdown (60 seconds by default), with a cancellation button and explicit acknowledgement caveats.
+- Run shutdown after an adjustable 10–300 second in-app countdown (120 seconds by default), with a cancellation button and explicit acknowledgement caveats.
 - Reboot over SSH and poll for the node to reconnect for up to ten minutes; show **Node back online** when SSH returns.
 - Use ordinary SSH and `sudo`; no agent or service is installed on a Pi.
 
