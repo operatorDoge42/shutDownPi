@@ -25,6 +25,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.jcraft.jsch.ChannelExec
@@ -97,11 +99,20 @@ class MainActivity : ComponentActivity() {
         var working by remember { mutableStateOf<String?>(null) }
         var countdownCancelled by remember { mutableStateOf(false) }
         var countdown by remember { mutableIntStateOf(120) }
+        var appVisible by remember { mutableStateOf(true) }
         var online by remember { mutableStateOf(setOf<String>()) }
         var connectionStates by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
         val scope = rememberCoroutineScope()
         var keyFingerprint by remember { mutableStateOf<String?>(null) }
         var keyDecision by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
+        DisposableEffect(activity) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_STOP) appVisible = false
+                if (event == Lifecycle.Event.ON_START) appVisible = true
+            }
+            activity.lifecycle.addObserver(observer)
+            onDispose { activity.lifecycle.removeObserver(observer) }
+        }
         SideEffect {
             requestHostKeyDialog = { keyFingerprint = pendingFingerprint }
         }
@@ -206,7 +217,11 @@ class MainActivity : ComponentActivity() {
                     scope.launch {
                         if (!reboot) {
                             for (left in countdown downTo 1) {
-                                if (countdownCancelled) { status = "Shutdown cancelled"; working = null; return@launch }
+                                if (countdownCancelled || !appVisible) {
+                                    status = if (countdownCancelled) "Shutdown cancelled" else "Countdown cancelled because the app left the screen"
+                                    working = null
+                                    return@launch
+                                }
                                 status = "Shutdown in ${left}s"; delay(1000)
                             }
                         }
