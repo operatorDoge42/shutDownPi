@@ -32,4 +32,4 @@ The local Git repository is named `shutDownPi` and uses the `main` branch. The s
 
 ## Safety and acknowledgement behavior
 
-The countdown happens in the app before it submits the command; leaving the app or killing its process interrupts that countdown. A successful SSH exit status is reported as sent. If SSH drops before an exit status, the app says the action may have started and asks the user to check the Pi. Network reachability is not proof that the machine is safe to power off. Reboot monitoring is best effort and has a ten-minute limit.
+The 120-second countdown happens in the app before it submits the command; it cancels if the app leaves the foreground or is closed. A successful SSH exit status is reported as sent. If SSH drops before an exit status, the app says the action may have started and asks the user to check the Pi. Network reachability is not proof that the machine is safe to power off. Reboot monitoring is best effort and has a ten-minute limit.
