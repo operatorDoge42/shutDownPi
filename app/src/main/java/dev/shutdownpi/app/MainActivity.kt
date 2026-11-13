@@ -96,7 +96,7 @@ class MainActivity : ComponentActivity() {
         var status by remember { mutableStateOf("Your nodes, at a glance") }
         var working by remember { mutableStateOf<String?>(null) }
         var countdownCancelled by remember { mutableStateOf(false) }
-        var countdown by remember { mutableIntStateOf(60) }
+        var countdown by remember { mutableIntStateOf(120) }
         var online by remember { mutableStateOf(setOf<String>()) }
         val scope = rememberCoroutineScope()
         var keyFingerprint by remember { mutableStateOf<String?>(null) }
